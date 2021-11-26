@@ -1,0 +1,1038 @@
+First Commit
+ref: refs/heads/master
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[remote "origin"]
+	url = git@github.com:f-prime/Love2D_Rope_Simulation.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+Unnamed repository; edit this file 'description' to name the repository.
+#!/bin/sh
+#
+# An example hook script to check the commit log message taken by
+# applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.  The hook is
+# allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "applypatch-msg".
+
+. git-sh-setup
+commitmsg="$(git rev-parse --git-path hooks/commit-msg)"
+test -x "$commitmsg" && exec "$commitmsg" ${1+"$@"}
+:
+#!/bin/sh
+#
+# An example hook script to check the commit log message.
+# Called by "git commit" with one argument, the name of the file
+# that has the commit message.  The hook should exit with non-zero
+# status after issuing an appropriate message if it wants to stop the
+# commit.  The hook is allowed to edit the commit message file.
+#
+# To enable this hook, rename this file to "commit-msg".
+
+# Uncomment the below to add a Signed-off-by line to the message.
+# Doing this in a hook is a bad idea in general, but the prepare-commit-msg
+# hook is more suited to it.
+#
+# SOB=$(git var GIT_AUTHOR_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# grep -qs "^$SOB" "$1" || echo "$SOB" >> "$1"
+
+# This example catches duplicate Signed-off-by lines.
+
+test "" = "$(grep '^Signed-off-by: ' "$1" |
+	 sort | uniq -c | sed -e '/^[ 	]*1[ 	]/d')" || {
+	echo >&2 Duplicate Signed-off-by lines.
+	exit 1
+}
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use IPC::Open2;
+
+# An example hook script to integrate Watchman
+# (https://facebook.github.io/watchman/) with git to speed up detecting
+# new and modified files.
+#
+# The hook is passed a version (currently 2) and last update token
+# formatted as a string and outputs to stdout a new update token and
+# all files that have been modified since the update token. Paths must
+# be relative to the root of the working tree and separated by a single NUL.
+#
+# To enable this hook, rename this file to "query-watchman" and set
+# 'git config core.fsmonitor .git/hooks/query-watchman'
+#
+my ($version, $last_update_token) = @ARGV;
+
+# Uncomment for debugging
+# print STDERR "$0 $version $last_update_token\n";
+
+# Check the hook interface version
+if ($version ne 2) {
+	die "Unsupported query-fsmonitor hook version '$version'.\n" .
+	    "Falling back to scanning...\n";
+}
+
+my $git_work_tree = get_working_dir();
+
+my $retry = 1;
+
+my $json_pkg;
+eval {
+	require JSON::XS;
+	$json_pkg = "JSON::XS";
+	1;
+} or do {
+	require JSON::PP;
+	$json_pkg = "JSON::PP";
+};
+
+launch_watchman();
+
+sub launch_watchman {
+	my $o = watchman_query();
+	if (is_work_tree_watched($o)) {
+		output_result($o->{clock}, @{$o->{files}});
+	}
+}
+
+sub output_result {
+	my ($clockid, @files) = @_;
+
+	# Uncomment for debugging watchman output
+	# open (my $fh, ">", ".git/watchman-output.out");
+	# binmode $fh, ":utf8";
+	# print $fh "$clockid\n@files\n";
+	# close $fh;
+
+	binmode STDOUT, ":utf8";
+	print $clockid;
+	print "\0";
+	local $, = "\0";
+	print @files;
+}
+
+sub watchman_clock {
+	my $response = qx/watchman clock "$git_work_tree"/;
+	die "Failed to get clock id on '$git_work_tree'.\n" .
+		"Falling back to scanning...\n" if $? != 0;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub watchman_query {
+	my $pid = open2(\*CHLD_OUT, \*CHLD_IN, 'watchman -j --no-pretty')
+	or die "open2() failed: $!\n" .
+	"Falling back to scanning...\n";
+
+	# In the query expression below we're asking for names of files that
+	# changed since $last_update_token but not from the .git folder.
+	#
+	# To accomplish this, we're using the "since" generator to use the
+	# recency index to select candidate nodes and "fields" to limit the
+	# output to file names only. Then we're using the "expression" term to
+	# further constrain the results.
+	if (substr($last_update_token, 0, 1) eq "c") {
+		$last_update_token = "\"$last_update_token\"";
+	}
+	my $query = <<"	END";
+		["query", "$git_work_tree", {
+			"since": $last_update_token,
+			"fields": ["name"],
+			"expression": ["not", ["dirname", ".git"]]
+		}]
+	END
+
+	# Uncomment for debugging the watchman query
+	# open (my $fh, ">", ".git/watchman-query.json");
+	# print $fh $query;
+	# close $fh;
+
+	print CHLD_IN $query;
+	close CHLD_IN;
+	my $response = do {local $/; <CHLD_OUT>};
+
+	# Uncomment for debugging the watch response
+	# open ($fh, ">", ".git/watchman-response.json");
+	# print $fh $response;
+	# close $fh;
+
+	die "Watchman: command returned no output.\n" .
+	"Falling back to scanning...\n" if $response eq "";
+	die "Watchman: command returned invalid output: $response\n" .
+	"Falling back to scanning...\n" unless $response =~ /^\{/;
+
+	return $json_pkg->new->utf8->decode($response);
+}
+
+sub is_work_tree_watched {
+	my ($output) = @_;
+	my $error = $output->{error};
+	if ($retry > 0 and $error and $error =~ m/unable to resolve root .* directory (.*) is not watched/) {
+		$retry--;
+		my $response = qx/watchman watch "$git_work_tree"/;
+		die "Failed to make watchman watch '$git_work_tree'.\n" .
+		    "Falling back to scanning...\n" if $? != 0;
+		$output = $json_pkg->new->utf8->decode($response);
+		$error = $output->{error};
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		# Uncomment for debugging watchman output
+		# open (my $fh, ">", ".git/watchman-output.out");
+		# close $fh;
+
+		# Watchman will always return all files on the first query so
+		# return the fast "everything is dirty" flag to git and do the
+		# Watchman query just to get it over with now so we won't pay
+		# the cost in git to look up each individual file.
+		my $o = watchman_clock();
+		$error = $output->{error};
+
+		die "Watchman: $error.\n" .
+		"Falling back to scanning...\n" if $error;
+
+		output_result($o->{clock}, ("/"));
+		$last_update_token = $o->{clock};
+
+		eval { launch_watchman() };
+		return 0;
+	}
+
+	die "Watchman: $error.\n" .
+	"Falling back to scanning...\n" if $error;
+
+	return 1;
+}
+
+sub get_working_dir {
+	my $working_dir;
+	if ($^O =~ 'msys' || $^O =~ 'cygwin') {
+		$working_dir = Win32::GetCwd();
+		$working_dir =~ tr/\\/\//;
+	} else {
+		require Cwd;
+		$working_dir = Cwd::cwd();
+	}
+
+	return $working_dir;
+}
+#!/bin/sh
+#
+# An example hook script to prepare a packed repository for use over
+# dumb transports.
+#
+# To enable this hook, rename this file to "post-update".
+
+exec git update-server-info
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed
+# by applypatch from an e-mail message.
+#
+# The hook should exit with non-zero status after issuing an
+# appropriate message if it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-applypatch".
+
+. git-sh-setup
+precommit="$(git rev-parse --git-path hooks/pre-commit)"
+test -x "$precommit" && exec "$precommit" ${1+"$@"}
+:
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git commit" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message if
+# it wants to stop the commit.
+#
+# To enable this hook, rename this file to "pre-commit".
+
+if git rev-parse --verify HEAD >/dev/null 2>&1
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=$(git hash-object -t tree /dev/null)
+fi
+
+# If you want to allow non-ASCII filenames set this variable to true.
+allownonascii=$(git config --type=bool hooks.allownonascii)
+
+# Redirect output to stderr.
+exec 1>&2
+
+# Cross platform projects tend to avoid non-ASCII filenames; prevent
+# them from being added to the repository. We exploit the fact that the
+# printable range starts at the space character and ends with tilde.
+if [ "$allownonascii" != "true" ] &&
+	# Note that the use of brackets around a tr range is ok here, (it's
+	# even required, for portability to Solaris 10's /usr/bin/tr), since
+	# the square bracket bytes happen to fall in the designated range.
+	test $(git diff --cached --name-only --diff-filter=A -z $against |
+	  LC_ALL=C tr -d '[ -~]\0' | wc -c) != 0
+then
+	cat <<\EOF
+Error: Attempt to add a non-ASCII file name.
+
+This can cause problems if you want to work with people on other platforms.
+
+To be portable it is advisable to rename the file.
+
+If you know what you are doing you can disable this check using:
+
+  git config hooks.allownonascii true
+EOF
+	exit 1
+fi
+
+# If there are whitespace errors, print the offending file names and fail.
+exec git diff-index --check --cached $against --
+#!/bin/sh
+#
+# An example hook script to verify what is about to be committed.
+# Called by "git merge" with no arguments.  The hook should
+# exit with non-zero status after issuing an appropriate message to
+# stderr if it wants to stop the merge commit.
+#
+# To enable this hook, rename this file to "pre-merge-commit".
+
+. git-sh-setup
+test -x "$GIT_DIR/hooks/pre-commit" &&
+        exec "$GIT_DIR/hooks/pre-commit"
+:
+#!/bin/sh
+
+# An example hook script to verify what is about to be pushed.  Called by "git
+# push" after it has checked the remote status, but before anything has been
+# pushed.  If this script exits with a non-zero status nothing will be pushed.
+#
+# This hook is called with the following parameters:
+#
+# $1 -- Name of the remote to which the push is being done
+# $2 -- URL to which the push is being done
+#
+# If pushing without using a named remote those arguments will be equal.
+#
+# Information about the commits which are being pushed is supplied as lines to
+# the standard input in the form:
+#
+#   <local ref> <local oid> <remote ref> <remote oid>
+#
+# This sample shows how to prevent push of commits where the log message starts
+# with "WIP" (work in progress).
+
+remote="$1"
+url="$2"
+
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+
+while read local_ref local_oid remote_ref remote_oid
+do
+	if test "$local_oid" = "$zero"
+	then
+		# Handle delete
+		:
+	else
+		if test "$remote_oid" = "$zero"
+		then
+			# New branch, examine all commits
+			range="$local_oid"
+		else
+			# Update to existing branch, examine new commits
+			range="$remote_oid..$local_oid"
+		fi
+
+		# Check for WIP commit
+		commit=$(git rev-list -n 1 --grep '^WIP' "$range")
+		if test -n "$commit"
+		then
+			echo >&2 "Found WIP commit in $local_ref, not pushing"
+			exit 1
+		fi
+	fi
+done
+
+exit 0
+#!/bin/sh
+#
+# Copyright (c) 2006, 2008 Junio C Hamano
+#
+# The "pre-rebase" hook is run just before "git rebase" starts doing
+# its job, and can prevent the command from running by exiting with
+# non-zero status.
+#
+# The hook is called with the following parameters:
+#
+# $1 -- the upstream the series was forked from.
+# $2 -- the branch being rebased (or empty when rebasing the current branch).
+#
+# This sample shows how to prevent topic branches that are already
+# merged to 'next' branch from getting rebased, because allowing it
+# would result in rebasing already published history.
+
+publish=next
+basebranch="$1"
+if test "$#" = 2
+then
+	topic="refs/heads/$2"
+else
+	topic=`git symbolic-ref HEAD` ||
+	exit 0 ;# we do not interrupt rebasing detached HEAD
+fi
+
+case "$topic" in
+refs/heads/??/*)
+	;;
+*)
+	exit 0 ;# we do not interrupt others.
+	;;
+esac
+
+# Now we are dealing with a topic branch being rebased
+# on top of master.  Is it OK to rebase it?
+
+# Does the topic really exist?
+git show-ref -q "$topic" || {
+	echo >&2 "No such branch $topic"
+	exit 1
+}
+
+# Is topic fully merged to master?
+not_in_master=`git rev-list --pretty=oneline ^master "$topic"`
+if test -z "$not_in_master"
+then
+	echo >&2 "$topic is fully merged to master; better remove it."
+	exit 1 ;# we could allow it, but there is no point.
+fi
+
+# Is topic ever merged to next?  If so you should not be rebasing it.
+only_next_1=`git rev-list ^master "^$topic" ${publish} | sort`
+only_next_2=`git rev-list ^master           ${publish} | sort`
+if test "$only_next_1" = "$only_next_2"
+then
+	not_in_topic=`git rev-list "^$topic" master`
+	if test -z "$not_in_topic"
+	then
+		echo >&2 "$topic is already up to date with master"
+		exit 1 ;# we could allow it, but there is no point.
+	else
+		exit 0
+	fi
+else
+	not_in_next=`git rev-list --pretty=oneline ^${publish} "$topic"`
+	/usr/bin/perl -e '
+		my $topic = $ARGV[0];
+		my $msg = "* $topic has commits already merged to public branch:\n";
+		my (%not_in_next) = map {
+			/^([0-9a-f]+) /;
+			($1 => 1);
+		} split(/\n/, $ARGV[1]);
+		for my $elem (map {
+				/^([0-9a-f]+) (.*)$/;
+				[$1 => $2];
+			} split(/\n/, $ARGV[2])) {
+			if (!exists $not_in_next{$elem->[0]}) {
+				if ($msg) {
+					print STDERR $msg;
+					undef $msg;
+				}
+				print STDERR " $elem->[1]\n";
+			}
+		}
+	' "$topic" "$not_in_next" "$not_in_master"
+	exit 1
+fi
+
+<<\DOC_END
+
+This sample hook safeguards topic branches that have been
+published from being rewound.
+
+The workflow assumed here is:
+
+ * Once a topic branch forks from "master", "master" is never
+   merged into it again (either directly or indirectly).
+
+ * Once a topic branch is fully cooked and merged into "master",
+   it is deleted.  If you need to build on top of it to correct
+   earlier mistakes, a new topic branch is created by forking at
+   the tip of the "master".  This is not strictly necessary, but
+   it makes it easier to keep your history simple.
+
+ * Whenever you need to test or publish your changes to topic
+   branches, merge them into "next" branch.
+
+The script, being an example, hardcodes the publish branch name
+to be "next", but it is trivial to make it configurable via
+$GIT_DIR/config mechanism.
+
+With this workflow, you would want to know:
+
+(1) ... if a topic branch has ever been merged to "next".  Young
+    topic branches can have stupid mistakes you would rather
+    clean up before publishing, and things that have not been
+    merged into other branches can be easily rebased without
+    affecting other people.  But once it is published, you would
+    not want to rewind it.
+
+(2) ... if a topic branch has been fully merged to "master".
+    Then you can delete it.  More importantly, you should not
+    build on top of it -- other people may already want to
+    change things related to the topic as patches against your
+    "master", so if you need further changes, it is better to
+    fork the topic (perhaps with the same name) afresh from the
+    tip of "master".
+
+Let's look at this example:
+
+		   o---o---o---o---o---o---o---o---o---o "next"
+		  /       /           /           /
+		 /   a---a---b A     /           /
+		/   /               /           /
+	       /   /   c---c---c---c B         /
+	      /   /   /             \         /
+	     /   /   /   b---b C     \       /
+	    /   /   /   /             \     /
+    ---o---o---o---o---o---o---o---o---o---o---o "master"
+
+
+A, B and C are topic branches.
+
+ * A has one fix since it was merged up to "next".
+
+ * B has finished.  It has been fully merged up to "master" and "next",
+   and is ready to be deleted.
+
+ * C has not merged to "next" at all.
+
+We would want to allow C to be rebased, refuse A, and encourage
+B to be deleted.
+
+To compute (1):
+
+	git rev-list ^master ^topic next
+	git rev-list ^master        next
+
+	if these match, topic has not merged in next at all.
+
+To compute (2):
+
+	git rev-list master..topic
+
+	if this is empty, it is fully merged to "master".
+
+DOC_END
+#!/bin/sh
+#
+# An example hook script to make use of push options.
+# The example simply echoes all push options that start with 'echoback='
+# and rejects all pushes when the "reject" push option is used.
+#
+# To enable this hook, rename this file to "pre-receive".
+
+if test -n "$GIT_PUSH_OPTION_COUNT"
+then
+	i=0
+	while test "$i" -lt "$GIT_PUSH_OPTION_COUNT"
+	do
+		eval "value=\$GIT_PUSH_OPTION_$i"
+		case "$value" in
+		echoback=*)
+			echo "echo from the pre-receive-hook: ${value#*=}" >&2
+			;;
+		reject)
+			exit 1
+		esac
+		i=$((i + 1))
+	done
+fi
+#!/bin/sh
+#
+# An example hook script to prepare the commit log message.
+# Called by "git commit" with the name of the file that has the
+# commit message, followed by the description of the commit
+# message's source.  The hook's purpose is to edit the commit
+# message file.  If the hook fails with a non-zero status,
+# the commit is aborted.
+#
+# To enable this hook, rename this file to "prepare-commit-msg".
+
+# This hook includes three examples. The first one removes the
+# "# Please enter the commit message..." help message.
+#
+# The second includes the output of "git diff --name-status -r"
+# into the message, just before the "git status" output.  It is
+# commented because it doesn't cope with --amend or with squashed
+# commits.
+#
+# The third example adds a Signed-off-by line to the message, that can
+# still be edited.  This is rarely a good idea.
+
+COMMIT_MSG_FILE=$1
+COMMIT_SOURCE=$2
+SHA1=$3
+
+/usr/bin/perl -i.bak -ne 'print unless(m/^. Please enter the commit message/..m/^#$/)' "$COMMIT_MSG_FILE"
+
+# case "$COMMIT_SOURCE,$SHA1" in
+#  ,|template,)
+#    /usr/bin/perl -i.bak -pe '
+#       print "\n" . `git diff --cached --name-status -r`
+# 	 if /^#/ && $first++ == 0' "$COMMIT_MSG_FILE" ;;
+#  *) ;;
+# esac
+
+# SOB=$(git var GIT_COMMITTER_IDENT | sed -n 's/^\(.*>\).*$/Signed-off-by: \1/p')
+# git interpret-trailers --in-place --trailer "$SOB" "$COMMIT_MSG_FILE"
+# if test -z "$COMMIT_SOURCE"
+# then
+#   /usr/bin/perl -i.bak -pe 'print "\n" if !$first_line++' "$COMMIT_MSG_FILE"
+# fi
+#!/bin/sh
+
+# An example hook script to update a checked-out tree on a git push.
+#
+# This hook is invoked by git-receive-pack(1) when it reacts to git
+# push and updates reference(s) in its repository, and when the push
+# tries to update the branch that is currently checked out and the
+# receive.denyCurrentBranch configuration variable is set to
+# updateInstead.
+#
+# By default, such a push is refused if the working tree and the index
+# of the remote repository has any difference from the currently
+# checked out commit; when both the working tree and the index match
+# the current commit, they are updated to match the newly pushed tip
+# of the branch. This hook is to be used to override the default
+# behaviour; however the code below reimplements the default behaviour
+# as a starting point for convenient modification.
+#
+# The hook receives the commit with which the tip of the current
+# branch is going to be updated:
+commit=$1
+
+# It can exit with a non-zero status to refuse the push (when it does
+# so, it must not modify the index or the working tree).
+die () {
+	echo >&2 "$*"
+	exit 1
+}
+
+# Or it can make any necessary changes to the working tree and to the
+# index to bring them to the desired state when the tip of the current
+# branch is updated to the new commit, and exit with a zero status.
+#
+# For example, the hook can simply run git read-tree -u -m HEAD "$1"
+# in order to emulate git fetch that is run in the reverse direction
+# with git push, as the two-tree form of git read-tree -u -m is
+# essentially the same as git switch or git checkout that switches
+# branches while keeping the local changes in the working tree that do
+# not interfere with the difference between the branches.
+
+# The below is a more-or-less exact translation to shell of the C code
+# for the default behaviour for git's push-to-checkout hook defined in
+# the push_to_deploy() function in builtin/receive-pack.c.
+#
+# Note that the hook will be executed from the repository directory,
+# not from the working tree, so if you want to perform operations on
+# the working tree, you will have to adapt your code accordingly, e.g.
+# by adding "cd .." or using relative paths.
+
+if ! git update-index -q --ignore-submodules --refresh
+then
+	die "Up-to-date check failed"
+fi
+
+if ! git diff-files --quiet --ignore-submodules --
+then
+	die "Working directory has unstaged changes"
+fi
+
+# This is a rough translation of:
+#
+#   head_has_history() ? "HEAD" : EMPTY_TREE_SHA1_HEX
+if git cat-file -e HEAD 2>/dev/null
+then
+	head=HEAD
+else
+	head=$(git hash-object -t tree --stdin </dev/null)
+fi
+
+if ! git diff-index --quiet --cached --ignore-submodules $head --
+then
+	die "Working directory has staged changes"
+fi
+
+if ! git read-tree -u -m "$commit"
+then
+	die "Could not update working tree to new HEAD"
+fi
+#!/bin/sh
+#
+# An example hook script to block unannotated tags from entering.
+# Called by "git receive-pack" with arguments: refname sha1-old sha1-new
+#
+# To enable this hook, rename this file to "update".
+#
+# Config
+# ------
+# hooks.allowunannotated
+#   This boolean sets whether unannotated tags will be allowed into the
+#   repository.  By default they won't be.
+# hooks.allowdeletetag
+#   This boolean sets whether deleting tags will be allowed in the
+#   repository.  By default they won't be.
+# hooks.allowmodifytag
+#   This boolean sets whether a tag may be modified after creation. By default
+#   it won't be.
+# hooks.allowdeletebranch
+#   This boolean sets whether deleting branches will be allowed in the
+#   repository.  By default they won't be.
+# hooks.denycreatebranch
+#   This boolean sets whether remotely creating branches will be denied
+#   in the repository.  By default this is allowed.
+#
+
+# --- Command line
+refname="$1"
+oldrev="$2"
+newrev="$3"
+
+# --- Safety check
+if [ -z "$GIT_DIR" ]; then
+	echo "Don't run this script from the command line." >&2
+	echo " (if you want, you could supply GIT_DIR then run" >&2
+	echo "  $0 <ref> <oldrev> <newrev>)" >&2
+	exit 1
+fi
+
+if [ -z "$refname" -o -z "$oldrev" -o -z "$newrev" ]; then
+	echo "usage: $0 <ref> <oldrev> <newrev>" >&2
+	exit 1
+fi
+
+# --- Config
+allowunannotated=$(git config --type=bool hooks.allowunannotated)
+allowdeletebranch=$(git config --type=bool hooks.allowdeletebranch)
+denycreatebranch=$(git config --type=bool hooks.denycreatebranch)
+allowdeletetag=$(git config --type=bool hooks.allowdeletetag)
+allowmodifytag=$(git config --type=bool hooks.allowmodifytag)
+
+# check for no description
+projectdesc=$(sed -e '1q' "$GIT_DIR/description")
+case "$projectdesc" in
+"Unnamed repository"* | "")
+	echo "*** Project description file hasn't been set" >&2
+	exit 1
+	;;
+esac
+
+# --- Check types
+# if $newrev is 0000...0000, it's a commit to delete a ref.
+zero=$(git hash-object --stdin </dev/null | tr '[0-9a-f]' '0')
+if [ "$newrev" = "$zero" ]; then
+	newrev_type=delete
+else
+	newrev_type=$(git cat-file -t $newrev)
+fi
+
+case "$refname","$newrev_type" in
+	refs/tags/*,commit)
+		# un-annotated tag
+		short_refname=${refname##refs/tags/}
+		if [ "$allowunannotated" != "true" ]; then
+			echo "*** The un-annotated tag, $short_refname, is not allowed in this repository" >&2
+			echo "*** Use 'git tag [ -a | -s ]' for tags you want to propagate." >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,delete)
+		# delete tag
+		if [ "$allowdeletetag" != "true" ]; then
+			echo "*** Deleting a tag is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/tags/*,tag)
+		# annotated tag
+		if [ "$allowmodifytag" != "true" ] && git rev-parse $refname > /dev/null 2>&1
+		then
+			echo "*** Tag '$refname' already exists." >&2
+			echo "*** Modifying a tag is not allowed in this repository." >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,commit)
+		# branch
+		if [ "$oldrev" = "$zero" -a "$denycreatebranch" = "true" ]; then
+			echo "*** Creating a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/heads/*,delete)
+		# delete branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	refs/remotes/*,commit)
+		# tracking branch
+		;;
+	refs/remotes/*,delete)
+		# delete tracking branch
+		if [ "$allowdeletebranch" != "true" ]; then
+			echo "*** Deleting a tracking branch is not allowed in this repository" >&2
+			exit 1
+		fi
+		;;
+	*)
+		# Anything else (is there anything else?)
+		echo "*** Update hook: unknown type of update to ref $refname of type $newrev_type" >&2
+		exit 1
+		;;
+esac
+
+# --- Finished
+exit 0
+DIRC      a o§5zƒŞa o§5zƒŞ   æ+Ş  ¤  è  è   
+ˆWX´Ac³VÆÿÀdøo  
+.gitignore        a p^ja p4à   æ+…  ¤  è  è   l$Ì eÏ»ÃØô+]ø!Sbş Makefile  a m¥:”E–a m¥7=Á}   æ!  ¤  è  è   TùYï¢Í‡˜ÕÕqL[wº±#ğ 	README.md a jÍ9\&Êa jÍ6ùÈN   æ+Æ  ¤  è  è  ,§iûÛïn²×*˜îcX²> main.lua  a o—„;Ëa o—jÁ   æ+ƒ  ¤  è  è  CDkA‹qÙJ=P»<núÈ,s] rope.lua  a e¢0â‰a e¢.€*{   æ+Ç  ¤  è  è  ‘u§Â?@X)dßLS$
+÷°zò vector2.lua       TREE    6 0
+ÌÊhA£&¸êëÕcƒbúµÌ®S4I» áHóó]9@ÜWøe	ˆ# git ls-files --others --exclude-from=.git/info/exclude
+# Lines that start with '#' are comments.
+# For a project mostly in C, the following would be a good set of
+# exclude patterns (uncomment them if you want to use them):
+# *.[oa]
+# *~
+0000000000000000000000000000000000000000 b04f4febe5b1380f1cf6be2c7c23aed3330d7b66 Frankie Primerano <frankieprimerano@gmail.com> 1637904570 -0500	commit (initial): First Commit
+0000000000000000000000000000000000000000 b04f4febe5b1380f1cf6be2c7c23aed3330d7b66 Frankie Primerano <frankieprimerano@gmail.com> 1637904570 -0500	commit (initial): First Commit
+0000000000000000000000000000000000000000 b04f4febe5b1380f1cf6be2c7c23aed3330d7b66 Frankie Primerano <frankieprimerano@gmail.com> 1637904640 -0500	update by push
+xuTMÓ0åÜ_a…K*UÑ¸ö´œb­På'­µ^;ØN?øõÌLœàd³UT%¯÷æÍøÉ¸'Qüğéq4Â»Ä^xøÓkeAßÅv³i{ÛDí¬0î•qR•Û¾.Ú*w©Äï:úFIôKo$Å[1º½ìNº	äüÕiô_(ë;Êõâú ˜Ì"†Vš xná9“a>ƒÊÌ!Õ±Çé¬Z"î;%#”*R%İ
+ë¢È"ã	,ØÄL¥ÃgÄRÖ[!­â˜9È)Œ:AíÌWD’e9BüÉİ¢¹ßí•ß¯Éo^h/¢ï©ô#M*©ÔĞ”2ÕÜ¥â·İjÇˆ·€-Mì3€ÿif„– F90	¶wHÅ9NêåØarYQán‡@•øš¤À7±ß‹ÂCì½-Ä„!Óg¿,@.c¸i¢7YôcCÂ¯™^'T` B–‘‰6¤g•Şà¨¼¼¤İ ‰0ÚòB‘f8úF3–kgœ€z'ŞÓiõ|Ô† ”ãÎ³rÆcà‘š9=''\Èi¯8ıQ…(}¬:4mauİ‰uNL2´ÚêpZYZX<Vx B;ùâÔ’„Å#šv¢ÀæG;ÀçiT€«6®ö¤º^&nxgÜ;ã|‰…îø©ÓTó@.İùÊ%U1š0‘eh^	‹ÑC•˜/ııjU·¢xKÊÉOR°0aPV0rQÊ/HUÎÌ-ÍI,ÉÌÏãârT(ÉÌ«T((ÊO/JÌUH*ÍÌ)Q(Ï,ÉPğÉ/Kê(ÉW(†¨OP2  £²83¹X kæÇxKÊÉOR04°`(*Í³ââÌÉ/KUĞÓÓ/.ÏÌK¢ø¢ü‚Ôb.®¤ÒÌœİòÔ$¨½¬bLe
+@yİdİTı
+º¹@;`@ Ï]%BxµUÍnÛ0ŞÙOAt{².@±5X^¡Ç^Š!pl¦æÈ™¬xíŠîÙÇI±£Øe98?’¥MÓn`qıåö]ÓVe=V¾uXÃŸGã0¿
+¢«"ËÔæ®­±#‹—× ¸GçMe¢0ÛmåMk¡rXz\÷¤Ç§Ü’ßçğß¢È 4ZƒöÑï(œ¨ç‡¶3ì»¬MçK[¡¸-’¼ òtèÎÂÈÌùè?ÑÖXÓÅ˜•¥<z`ák†¶Î.à2üiÏ30İšPşÀšñ²&eNgÍK MèİÒâ/‰X‡ıú-³	pe]“‹±~
+š¶’²¬cq½Ã²¦ì¡ıÓõPŠmëÀ’åıµnI'Ã~¤Íƒı.³•9¥qÆ4Lô|ƒÅøZÿÎQrQñ0 d$But­UeMCfZ±2‹@²¤/Tòg×’VBOÅÑºÔ\‹KÑÆ¼½p&‹JØ¾Ü487¶#Êç’áÜ8À¹&A?ùßÇ½š‘x…˜…œH’¶¬ÁÒå¬“„ÔÚL€ä­‚±Ï#jSÅmDl‰±RèÒ»g•NSËÓ™ı±¡mÏkÏP˜[Êü/Ü:¸å•_i¥N­‰3ã ıáÁ{Û ql$=³ZÒ*É­’ü–İq$ÃÍ,¸¡ì0Üüù<-I>äÜÎ¿Ò·öòE&¡`ƒŠÄŒG•Ù‡F¦ÀhQ{!Ù$ıC¯-Õ-©h…Ğ‘^çrcŠçv^œIU,;z0¿ßh+4^Mï‚^ğ)ä™£4t2[±´­Û—ùÄ=)WîÁ…Ho`ßö¸§’¨ „$ )Ã]ÿ	äá	N×G´7B‰WK•}a×1<íİÿA7Ë	³óÜà*,pz&È=y_+¾%8&ÿ³ .,Éâ‘Åñf q<Î²×ì/2!«x…RMSƒ0õÌ¯Øch)j=Ùÿ†G;¤Ê$5Mtúßİ|@…!z!û2Ë{o_¶je÷7­¬iÏ¼ÖRíá	¾3 ƒç]…Å%ËNƒ¨u#ÅØyü“˜lmCº¿/{®;®©¦UË‰,·'×æÎòxlãNÁA¼•¥ÆWNÏb¥¸” ™qÁV´;úJalë¨~+ûw¥‰W0ğ{Ø9ë@àRu´m¾¸gS wôvXÈÄŒüäQè°'XZğ(¥Å…c‚äıLŞáŸ»h6GwcÆ“CÂ;kzMEÍçt×(–4!“¥ÜáPÆæÜ+óoÁ™ğ7bıÕú¡ú—p7'ô0Mˆ›ËI_ª~Eºâs¡kr:^¤¼2©ç^ãƒo¼¿ërylSot>«Fh¿\¡
+,£‹(·8ÚÎ~ “l"xKÊÉOR04`ĞÒ+.NÔ­Šå 2U-x¥Q
+B!Eûv³b:>DÁûn£Í+)3ÌöŸ­ ¿Ë¹pN,9§iÕªÄÙy;°Ñ.xa	'rÆ§ÔO!c¬¿Ú¥T˜+ß¯IàXS–¾l—/züÈşœ9İ6±äÎŒZÖHˆªÓŞoò¿IÍ©>>Bõ—éE„x+)JMU022b040031QĞKÏ,ÉLÏË/Je˜'Õ.±Å1ys}Ø±ÿR~ÌÍ‡©òMÌNMËÌIeP9£z~÷á_yµc)'ı“‡šäêèâëª—›ÂÀüSP òı¢³í3®^-ô‰.ßµQùTQnbf^Ni"ÓòÌß·ßçmêg¹Î¨5ã]²xÄ&;¨š¢ü‚T°g—lÇîBÆ›^¶»mò~IŸĞ)…ª)KM.É/2++]~ÈŞ!B3å¾O°Š8×÷ULŸæ íûW3b04f4febe5b1380f1cf6be2c7c23aed3330d7b66
+b04f4febe5b1380f1cf6be2c7c23aed3330d7b66
+*.sw[a-z]
+b0VIM 8.2      —o aƒ+æ ¬	 gazo                                    gazo                                    ~gazo/Projects/swinging_ropes/rope.lua                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       utf-8 3210    #"! U                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 tp           ]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             ad  Q  á     ]       İ  Ü  Ë  ¶  µ    V  K  8  $          à  Õ  º  ˜  r  n  j  i  E      ø  Ş    ‚  z  t  s  S  >  =  '    Ã  ½  ¼  —  –  ~  Z  T  P  O  >  1           ü  ë  Ò  Î  Ê  É  ³  œ  ‚  c  9  ê
+   
+  y
+  q
+  k
+  j
+  O
+  /
+  ß	  ‹	  Š	  b	  (	  ô  ì  ë  Ä  Š  W  O  I  E  D  ;  "    ú  ã  á  R  #    K  9                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                }   get_line = get_li}   get_line = get_line,   simulate = simulate,}   get_line = get_line,   simulate = simulate,}   get_line = get_line,   simulate =}   get_line = get_line,   sim}   get_line = get_line, } } }   get_line = get_line,   simulate = simulate,   clear = clear,   add_point = add_point, return {  end   end     end       vertex.start.position = center:sub(movement)       local movement = direction:scale(vertex.length / 2)     if not vertex.start.is_locked then      end       vertex.finish.position = center:add(movement)       local movement = direction:scale(vertex.length / 2)     if not vertex.finish.is_locked then      local direction = vertex.finish.position:sub(vertex.start.position):normalize()     local center = vertex.start.position:add(vertex.finish.position):scale(0.5)     local vertex = Verticies[v]   for v = 1, #Verticies do    end     end       node.prev_position = current_pos       node.position.y = node.position.y + node.position.y * 9.8 * dt * dt       node.position = node.position:add(node.position:sub(node.prev_position))       local current_pos = node.position       if not node.is_locked then     local node = Nodes[p]   for p = 1, #Nodes do function simulate(dt)  end   }     Verticies=Verticies,     Nodes=Nodes,   return { function get_line()  end   Verticies = {}   Nodes = {} function clear()  end   end     table.insert(Verticies, vertex)   if vertex ~= nil then    table.insert(Nodes, new_line_head)    end     vertex = create_vertex(current_line_head, new_line_head)      current_line_head = Nodes[#Nodes]   if #Nodes ~= 0 then    local vertex = nil   local current_line_head = nil    end     end       new_line_head = node     if node.position:distance(new_line_head.position) < 25 then      local node = Nodes[n]   for n = 1, #Nodes do    local new_line_head = create_node(x, y, is_locked) function add_point(x, y, is_locked)  end   }     prev_position = vector2:new(x, y)     position = vector2:new(x, y),     is_locked = is_locked,   return { function create_node(x, y, is_locked)  end   }     length = length,     finish = node2,     start = node1,   return {   local length = node1.position:distance(node2.position)  function create_vertex(node1, node2)  local Verticies = {} local Nodes = {}  local vector2 = require("vector2") run:
+	love ../swinging_ropes
+
+build-web:
+	love.js ../swinging_ropes web -c -t swinging_ropes -m 1000000000 
+# 2D Rope Simulation
+
+A tiny program built with Love2D to simulate 2D rope physics.
+local rope = require("rope")
+
+function love.load()
+  love.window.setTitle("Rope Simulation") 
+  love.graphics.setPointSize(10)
+  mouse_is_down = false
+  next_point_is_locked = false
+  simulating = false
+end
+
+function love.update(dt)
+  if not simulating then
+    if love.mouse.isDown(1) and not mouse_is_down then
+      local mouse_x = love.mouse.getX()
+      local mouse_y = love.mouse.getY()
+      mouse_is_down = true
+      rope.add_point(mouse_x, mouse_y, next_point_is_locked)
+    elseif not love.mouse.isDown(1) then
+      mouse_is_down = false
+    end
+  else
+    rope.simulate(dt)
+  end
+end
+
+function love.keypressed(key)
+  if key == "return" then
+    simulating = not simulating 
+  elseif key == "lctrl" then
+    next_point_is_locked = not next_point_is_locked
+  elseif key == "delete" then
+    rope.clear()
+  end
+end
+
+function love.draw()
+  local line = rope.get_line()
+
+  for v = 1, #line.Verticies do
+    local vertex = line.Verticies[v]
+    love.graphics.line(vertex.start.position.x, vertex.start.position.y, vertex.finish.position.x, vertex.finish.position.y)
+  end
+
+  for n = 1, #line.Nodes do
+    local node = line.Nodes[n]
+    if node.is_locked then
+      love.graphics.setColor(1, 0, 0, 1)
+    end
+    love.graphics.points(node.position.x, node.position.y)
+    love.graphics.setColor(1, 1, 1, 1)
+  end
+
+end
+local vector2 = require("vector2")
+
+local Nodes = {}
+local Verticies = {}
+
+function create_vertex(node1, node2)
+  local length = node1.position:distance(node2.position) 
+  return {
+    start = node1,
+    finish = node2,
+    length = length,
+  }
+end
+
+function create_node(x, y, is_locked)
+  return {
+    is_locked = is_locked,
+    position = vector2:new(x, y),
+    prev_position = vector2:new(x, y)
+  }
+end
+
+function add_point(x, y, is_locked)
+  local new_line_head = create_node(x, y, is_locked)
+
+  for n = 1, #Nodes do
+    local node = Nodes[n]
+    if node.position:distance(new_line_head.position) < 25 then 
+      new_line_head = node
+    end
+  end
+
+  local current_line_head = nil
+  local vertex = nil
+
+  if #Nodes ~= 0 then
+    current_line_head = Nodes[#Nodes]
+    vertex = create_vertex(current_line_head, new_line_head) 
+  end
+
+  table.insert(Nodes, new_line_head)
+
+  if vertex ~= nil then
+    table.insert(Verticies, vertex)
+  end
+end
+
+function clear()
+  Nodes = {}
+  Verticies = {}
+end
+
+function get_line()
+  return {
+    Nodes=Nodes,
+    Verticies=Verticies,
+  }
+end
+
+function simulate(dt)
+  for p = 1, #Nodes do
+    local node = Nodes[p]
+    if not node.is_locked then
+      local current_pos = node.position  
+      node.position = node.position:add(node.position:sub(node.prev_position))
+      node.position.y = node.position.y + node.position.y * 9.8 * dt * dt
+      node.prev_position = current_pos
+    end
+  end
+
+  for v = 1, #Verticies do
+    local vertex = Verticies[v]
+    local center = vertex.start.position:add(vertex.finish.position):scale(0.5)
+    local direction = vertex.finish.position:sub(vertex.start.position):normalize()
+
+    if not vertex.finish.is_locked then
+      local movement = direction:scale(vertex.length / 2)
+      vertex.finish.position = center:add(movement)
+    end
+
+    if not vertex.start.is_locked then
+      local movement = direction:scale(vertex.length / 2)
+      vertex.start.position = center:sub(movement)
+    end
+  end
+end
+
+return {
+  add_point = add_point,
+  clear = clear,
+  simulate = simulate,
+  get_line = get_line,
+}
+local Vector2 = {
+  x = 0,
+  y = 0,
+}
+
+function Vector2:new(x, y)
+  local o = {}
+  setmetatable(o, self)
+  self.__index = self
+  o.x = x
+  o.y = y
+  return o
+end
+
+function Vector2:mag()
+  return math.sqrt(self.x ^ 2 + self.y ^ 2)
+end
+
+function Vector2:normalize()
+  local mag = self:mag()
+  return Vector2:new(self.x / mag, self.y / mag)
+end
+
+function Vector2:direction(v2)
+  return (v2.y - self.y) / (v2.x - self.x) 
+end
+
+function Vector2:distance(v2)
+  return math.sqrt((v2.x - self.x) ^ 2 + (v2.y - self.y) ^ 2)
+end
+
+function Vector2:add(v2)
+  return Vector2:new(self.x + v2.x, self.y + v2.y)
+end
+
+function Vector2:sub(v2)
+  return Vector2:new(self.x - v2.x, self.y - v2.y)
+end
+
+function Vector2:scale(scalar)
+  return Vector2:new(self.x * scalar, self.y * scalar)
+end
+
+function Vector2:dot(v2)
+  return self.x * v2.x + self.y * v2.y 
+end
+
+function Vector2:pprint()
+  print(self.x, self.y)
+end
+
+return Vector2
