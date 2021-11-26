@@ -68,19 +68,21 @@ function simulate(dt)
     end
   end
 
-  for v = 1, #Verticies do
-    local vertex = Verticies[v]
-    local center = vertex.start.position:add(vertex.finish.position):scale(0.5)
-    local direction = vertex.finish.position:sub(vertex.start.position):normalize()
+  for i = 0, 100 do 
+    for v = 1, #Verticies do
+      local vertex = Verticies[v]
+      local center = vertex.start.position:add(vertex.finish.position):scale(0.5)
+      local direction = vertex.finish.position:sub(vertex.start.position):normalize()
 
-    if not vertex.finish.is_locked then
-      local movement = direction:scale(vertex.length / 2)
-      vertex.finish.position = center:add(movement)
-    end
+      if not vertex.finish.is_locked then
+        local movement = direction:scale(vertex.length / 2)
+        vertex.finish.position = center:add(movement)
+      end
 
-    if not vertex.start.is_locked then
-      local movement = direction:scale(vertex.length / 2)
-      vertex.start.position = center:sub(movement)
+      if not vertex.start.is_locked then
+        local movement = direction:scale(vertex.length / 2)
+        vertex.start.position = center:sub(movement)
+      end
     end
   end
 end
