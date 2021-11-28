@@ -62,7 +62,7 @@ function simulate(dt)
     local node = Nodes[p]
     if not node.is_locked then
       local current_pos = node.position  
-      node.position = node.position:add(node.position:sub(node.prev_position))
+      node.position = node.position + (node.position - node.prev_position)
       node.position.y = node.position.y + node.position.y * 9.8 * dt * dt
       node.prev_position = current_pos
     end
@@ -71,17 +71,15 @@ function simulate(dt)
   for i = 0, 100 do 
     for v = 1, #Verticies do
       local vertex = Verticies[v]
-      local center = vertex.start.position:add(vertex.finish.position):scale(0.5)
-      local direction = vertex.finish.position:sub(vertex.start.position):normalize()
+      local center = (vertex.start.position + vertex.finish.position) / 2
+      local direction = (vertex.finish.position - vertex.start.position):normalize()
 
       if not vertex.finish.is_locked then
-        local movement = direction:scale(vertex.length / 2)
-        vertex.finish.position = center:add(movement)
+        vertex.finish.position = center + direction * (vertex.length / 2) 
       end
 
       if not vertex.start.is_locked then
-        local movement = direction:scale(vertex.length / 2)
-        vertex.start.position = center:sub(movement)
+        vertex.start.position = center - direction * (vertex.length / 2) 
       end
     end
   end
